@@ -1,0 +1,457 @@
+version: "3.8"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/gluetun:/gluetun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    environment:
+      - TZ=Europe/Tirane
+      - HTTP_CONTROL_SERVER_ADDRESS=:8002
+      # NORDVPN CONFIG
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - SERVER_COUNTRIES=Albania
+      - SERVER_CITIES=Tirana
+      
+      - BLOCK_IPV6=on
+      - FIREWALL=on
+      
+      - FIREWALL_OUTBOUND_SUBNETS=172.16.1.0/24,192.168.1.0/24
+      #- FIREWALL_INPUT_PORTS=8501,8080,8000,15888,18083
+      - FIREWALL_INPUT_PORTS=8501,8080,15888,18083
+      - UPDATER_PERIOD=24h
+
+    # Publish ALL app ports here (everything else shares gluetun's network stack)
+    ports:
+      - "8501:8501"     # Hummingbot Dashboard
+      - "8080:8080"     # Dozzle
+      #- "8000:8000"     # Hummingbot API
+      - "15888:15888"   # Hummingbot Gateway
+      - "18083:18083"   # EMQX Dashboard
+
+    healthcheck:
+      test: ["CMD-SHELL", "/gluetun-entrypoint healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  wait-for-vpn:
+    image: alpine
+    container_name: wait-for-vpn
+    network_mode: "service:gluetun" # Ensures it uses the VPN stack
+    depends_on:
+      - gluetun
+    command: sh -c "echo 'Starting 30s countdown...'; sleep 30; echo 'Timer finished!'"
+
+  # Restarts containers labeled autoheal=true if they go unhealthy
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    network_mode: none
+    environment:
+      - TZ=Europe/Tirane
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging: *default-logging
+
+  hummingbot-password-init:
+    image: hummingbot/hummingbot:latest
+    container_name: hummingbot-password-init
+    network_mode: none
+    user: "0:0"
+    depends_on:
+      hummingbot-seed:
+        condition: service_completed_successfully
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        # Activate the hummingbot conda environment
+        . /opt/conda/etc/profile.d/conda.sh
+        conda activate hummingbot
+
+        CONF_DIR="/humming_dir/hummingbot/conf"
+        API_MASTER="/humming_dir/api/data/bots/credentials/master_account"
+        PW="$${CONFIG_PASSWORD:-admin}"
+
+        # Generate .password_verification for the hummingbot client
+        if [ ! -f "$$CONF_DIR/.password_verification" ]; then
+          echo "=== generating hummingbot .password_verification ==="
+          cd /home/hummingbot
+          python -c "
+        import os, sys
+        os.environ['CONF_DIR_PATH'] = '$$CONF_DIR'
+        sys.path.insert(0, '/home/hummingbot')
+        from hummingbot.client.config.config_crypt import store_password_verification, ETHKeyFileSecretManger
+        sm = ETHKeyFileSecretManger('$$PW')
+        store_password_verification(sm)
+        print('Created: $$CONF_DIR/.password_verification')
+        "
+        else
+          echo "=== hummingbot .password_verification already exists, skipping ==="
+        fi
+
+        # Copy to API master_account if it doesn't exist there
+        if [ ! -f "$$API_MASTER/.password_verification" ] && [ -f "$$CONF_DIR/.password_verification" ]; then
+          echo "=== copying .password_verification to API master_account ==="
+          cp "$$CONF_DIR/.password_verification" "$$API_MASTER/.password_verification"
+        else
+          echo "=== API .password_verification already exists, skipping ==="
+        fi
+
+        echo "=== password init complete ==="
+    environment:
+      - TZ=Europe/Tirane
+      - CONFIG_PASSWORD=${HBOT_API_PASSWORD:-admin}
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot:/humming_dir
+    restart: "no"
+    logging: *default-logging
+
+  hummingbot:
+    image: hummingbot/hummingbot:latest
+    container_name: hummingbot
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+      hummingbot-password-init:          # <-- add this
+        condition: service_completed_successfully
+    tty: true
+    stdin_open: true
+    environment:
+      - TZ=Europe/Tirane
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/conf:/home/hummingbot/conf
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/logs:/home/hummingbot/logs
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/data:/home/hummingbot/data
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/certs:/home/hummingbot/certs
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/scripts:/home/hummingbot/scripts
+      - /mnt/sharedrive/apps/hummingbot/hummingbot/controllers:/home/hummingbot/controllers
+    restart: unless-stopped
+    logging: *default-logging
+
+  gateway:
+    image: hummingbot/gateway:latest
+    container_name: hummingbot-gateway
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - GATEWAY_PASSPHRASE=${GATEWAY_PASSPHRASE}
+      - DEV=${DEV_VAR:-false}
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/gateway/conf:/home/gateway/conf
+      - /mnt/sharedrive/apps/hummingbot/gateway/logs:/home/gateway/logs
+      - /mnt/sharedrive/apps/hummingbot/gateway/certs:/home/gateway/certs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const net=require('net');const s=net.createConnection(15888,'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{s.end();process.exit(0)});s.on('timeout',()=>process.exit(1));s.on('error',()=>process.exit(1));"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  postgres:
+    image: postgres:16
+    container_name: hummingbot-postgres
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - POSTGRES_DB=hummingbot_api
+      - POSTGRES_USER=hbot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/postgres/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hbot -d hummingbot_api"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  hummingbot-seed:
+    image: emqx:5
+    container_name: hummingbot-seed
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      - TZ=Europe/Tirane
+      - ADMIN_USER_ID=${ADMIN_USER_ID}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot:/humming_dir
+    command: "/humming_dir/bootstrap/hummingbot_seed.sh"
+    restart: "no"
+    logging: *default-logging
+
+  emqx:
+    image: emqx:5
+    container_name: hummingbot-broker
+    network_mode: "service:gluetun"
+    # IMPORTANT: Make hostname a stable FQDN
+    # hostname: emqx.hbot.local
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      #- EMQX_NODE_NAME=emqx@127.0.0.1  # <--- CRITICAL: Force local binding
+      - EMQX_NODE__NAME=emqx@127.0.0.1
+      - EMQX_LISTENER__TCP__EXTERNAL=127.0.0.1:1883
+      - EMQX_DASHBOARD__LISTENERS__HTTP__BIND=127.0.0.1:18083
+      - EMQX_LOADED_PLUGINS=emqx_recon,emqx_retainer,emqx_management,emqx_dashboard
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/emqx/data:/opt/emqx/data
+      - /mnt/sharedrive/apps/hummingbot/emqx/log:/opt/emqx/log
+      - /mnt/sharedrive/apps/hummingbot/emqx/etc:/opt/emqx/etc
+    healthcheck:
+      # test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18083/status >/dev/null || wget -qO- http://127.0.0.1:18083/status >/dev/null"]
+      test: ["CMD", "/opt/emqx/bin/emqx_ctl", "status", "--name", "emqx@127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  hummingbot-api:
+    image: hummingbot/hummingbot-api:latest
+    container_name: hummingbot-api
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/patches/docker_service.py:/hummingbot-api/services/docker_service.py:ro
+      - /mnt/sharedrive/apps/hummingbot/api/data/bots:/hummingbot-api/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=Europe/Tirane
+      - USERNAME=${HBOT_API_USERNAME:-admin}
+      - PASSWORD=${HBOT_API_PASSWORD:-admin}
+      - BROKER_HOST=127.0.0.1
+      - BROKER_PORT=1883
+      - DATABASE_URL=postgresql+asyncpg://hbot:${POSTGRES_PASSWORD}@127.0.0.1:5432/hummingbot_api
+      - GATEWAY_URL=http://127.0.0.1:15888
+      - DOCKER_BOT_NETWORK_MODE=container:gluetun
+      - BOTS_PATH=/mnt/sharedrive/apps/hummingbot/api/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  hummingbot-mcp:
+    image: hummingbot/hummingbot-mcp:latest
+    container_name: hummingbot-mcp
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      hummingbot-api:
+        condition: service_healthy
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - HUMMINGBOT_API_URL=http://127.0.0.1:8000
+      - HUMMINGBOT_USERNAME=${HBOT_API_USERNAME:-admin}
+      - HUMMINGBOT_PASSWORD=${HBOT_API_PASSWORD:-admin}
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/controllers/mcp:/root/.hummingbot_mcp
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  dashboard:
+    image: hummingbot/dashboard:latest
+    container_name: hummingbot-dashboard
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      hummingbot-api:
+        condition: service_healthy
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - AUTH_SYSTEM_ENABLED=False
+      - BACKEND_API_HOST=127.0.0.1
+      - BACKEND_API_PORT=8000
+      - BACKEND_API_USERNAME=${HBOT_API_USERNAME:-admin}
+      - BACKEND_API_PASSWORD=${HBOT_API_PASSWORD:-admin}
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/dashboard/credentials.yml:/home/dashboard/credentials.yml
+      #- /mnt/sharedrive/apps/hummingbot/dashboard/pages:/home/dashboard/frontend/pages
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8501),2); s.close()"
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  # Condor (Telegram) - behind VPN (shares gluetun network)
+  condor:
+    image: hummingbot/condor:latest
+    container_name: condor-bot
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      hummingbot-api:
+        condition: service_healthy
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - ADMIN_USER_ID=${ADMIN_USER_ID}
+      - CONDOR_PERSISTENCE_FILE=/app/data/condor_bot_data.pickle
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/condor/data:/app/data
+      - /mnt/sharedrive/apps/hummingbot/condor/config.yml:/app/config.yml
+      - /mnt/sharedrive/apps/hummingbot/condor/routines:/app/routines
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('api.telegram.org',443),2); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "/dozzle", "healthcheck"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging

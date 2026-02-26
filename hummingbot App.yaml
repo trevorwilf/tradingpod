@@ -511,7 +511,8 @@ services:
   # ===========================================================================
 
   hummingbot:
-    image: hummingbot/hummingbot:latest
+    # image: hummingbot/hummingbot:latest
+    image: hummingbot-nonkyc:latest # custom build with KYC connectors enabled (for personal use only)
     container_name: hummingbot
     network_mode: "service:gluetun"
     depends_on:

@@ -91,6 +91,8 @@ get_emqx_version() {
 ADMIN_USER_ID="$(sanitize "${ADMIN_USER_ID:-}")"
 TELEGRAM_TOKEN="$(sanitize "${TELEGRAM_TOKEN:-}")"
 
+POSTGRESQL_DB_PASS="$(sanitize "${POSTGRES_PASSWORD:-}")"
+
 BASE="/humming_dir"
 
 # ==================== PATH DEFINITIONS ====================
@@ -245,7 +247,12 @@ mqtt_bridge:
 send_error_logs: true
 
 db_mode:
-  db_engine: sqlite
+  db_engine: postgres
+  db_host: 127.0.0.1
+  db_port: 5432
+  db_name: hummingbot_api
+  db_username: hbot
+  db_password: "$POSTGRESQL_DB_PASS"
 
 balance_asset_limit: {}
 
@@ -281,6 +288,7 @@ paper_trade:
   - kraken
   - gate_io
   - mexc
+  - nonkyc
   paper_trade_account_balance:
     BTC: 1.0
     USDT: 100000.0
@@ -312,7 +320,7 @@ color:
 tick_size: 1.0
 
 market_data_collection:
-  market_data_collection_enabled: false
+  market_data_collection_enabled: true
   market_data_collection_interval: 60
   market_data_collection_depth: 20
 __CONF_CLIENT__

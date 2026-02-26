@@ -263,3 +263,5 @@ echo ""
 # Show image size
 docker image inspect "$FULL_TAG" --format='Image size: {{.Size}}' 2>/dev/null | \
   awk '{printf "Image size: %.0f MB\n", $3/1024/1024}' || true
+
+docker tag hummingbot-nonkyc:latest hummingbot/hummingbot:latest

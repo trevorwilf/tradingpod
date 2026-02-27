@@ -58,11 +58,19 @@ services:
       - FIREWALL_OUTBOUND_SUBNETS=172.16.1.0/24,192.168.1.0/24
       - FIREWALL_INPUT_PORTS=8501,8080,15888,18083
       - UPDATER_PERIOD=24h
+
+      # NEW: avoid ICMP-based small checks (your log shows ICMP timeouts)
+      - HEALTH_SMALL_CHECK_TYPE=dns
+
+      # NEW: use DoH instead of DoT to avoid 853 flakiness
+      - DNS_UPSTREAM_RESOLVER_TYPE=doh
+      - DNS_UPSTREAM_RESOLVERS=cloudflare,google,quad9
+
     ports:
-      - "8501:8501"     # Hummingbot Dashboard
-      - "8080:8080"     # Dozzle
-      - "15888:15888"   # Hummingbot Gateway
-      - "18083:18083"   # EMQX Dashboard
+      - "8501:8501"
+      - "8080:8080"
+      - "15888:15888"
+      - "18083:18083"
     healthcheck:
       test: ["CMD-SHELL", "/gluetun-entrypoint healthcheck"]
       interval: 10s

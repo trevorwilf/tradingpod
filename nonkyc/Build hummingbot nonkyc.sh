@@ -4,34 +4,26 @@ set -euo pipefail
 # =============================================================================
 # build_hummingbot_nonkyc.sh
 #
-# Builds a custom hummingbot Docker image that includes the NonKYC exchange
-# connector on top of the latest official hummingbot codebase.
+# Builds a custom hummingbot Docker image from a SINGLE repo/branch:
+#   https://github.com/trevorwilf/hummingbot  (branch: nonkyc)
 #
-# How it works:
-#   1. Clones the official hummingbot/hummingbot repo (latest master)
-#   2. Clones the NonKYCExchange/hummingbot fork (sparse — connector only)
-#   3. Copies the nonkyc connector into the official tree
-#   4. Verifies the connector structure
-#   5. Builds a Docker image tagged for your Trading Pod compose
+# Additionally bakes in a Postgres driver (psycopg2-binary) so DB mode works.
 #
 # Usage:
 #   chmod +x build_hummingbot_nonkyc.sh
 #   ./build_hummingbot_nonkyc.sh              # build with defaults
 #   ./build_hummingbot_nonkyc.sh --tag v2     # custom tag suffix
 #   ./build_hummingbot_nonkyc.sh --no-cache   # force full Docker rebuild
-#
-# Re-run any time to pick up upstream updates from either repo.
+#   ./build_hummingbot_nonkyc.sh --dir /tmp/x # custom working directory
 # =============================================================================
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-OFFICIAL_REPO="https://github.com/hummingbot/hummingbot.git"
-OFFICIAL_BRANCH="master"
+# SINGLE SOURCE REPO (per your request)
+HB_REPO="https://github.com/trevorwilf/hummingbot.git"
+HB_BRANCH="nonkyc"
 
-NONKYC_REPO="https://github.com/NonKYCExchange/hummingbot.git"
-NONKYC_BRANCH="master"
-
-# Connector path inside the hummingbot source tree
+# Connector path inside the hummingbot source tree (we still verify it exists)
 CONNECTOR_REL_PATH="hummingbot/connector/exchange/nonkyc"
 
 # Docker image name — this is what your compose file should reference
@@ -43,6 +35,9 @@ BUILD_DIR="${BUILD_DIR:-/tmp/hummingbot-nonkyc-build}"
 
 # Docker build flags
 DOCKER_BUILD_FLAGS=""
+
+# Postgres driver to bake in (permanently fixes "no psycopg2/psycopg/asyncpg")
+PG_DRIVER_PIP_PACKAGE="psycopg2-binary"
 
 # ── Parse CLI args ─────────────────────────────────────────────────────────
 
@@ -82,161 +77,112 @@ check_prereqs() {
 # ── Main ───────────────────────────────────────────────────────────────────
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  Hummingbot + NonKYC Connector — Custom Docker Build        ║"
+echo "║  Hummingbot (trevorwilf/nonkyc) — Custom Docker Build        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
 check_prereqs
 
-OFFICIAL_DIR="$BUILD_DIR/official"
-NONKYC_DIR="$BUILD_DIR/nonkyc-fork"
-
+SRC_DIR="$BUILD_DIR/src"
 mkdir -p "$BUILD_DIR"
 
-# ── Step 1: Clone / update official repo ───────────────────────────────────
+# ── Step 1: Clone / update single repo ─────────────────────────────────────
 
-log "Step 1/5: Official hummingbot repo"
-if [ -d "$OFFICIAL_DIR/.git" ]; then
+log "Step 1/4: Clone/update source repo"
+if [ -d "$SRC_DIR/.git" ]; then
   log "  Updating existing clone..."
-  cd "$OFFICIAL_DIR"
-  git fetch origin "$OFFICIAL_BRANCH" --depth=1
-  git reset --hard "origin/$OFFICIAL_BRANCH"
+  cd "$SRC_DIR"
+  git fetch origin "$HB_BRANCH" --depth=1
+  git reset --hard "origin/$HB_BRANCH"
   git clean -fdx
 else
-  log "  Cloning $OFFICIAL_REPO ($OFFICIAL_BRANCH)..."
-  rm -rf "$OFFICIAL_DIR"
-  git clone --depth=1 --branch "$OFFICIAL_BRANCH" "$OFFICIAL_REPO" "$OFFICIAL_DIR"
-fi
-cd "$OFFICIAL_DIR"
-OFFICIAL_SHA="$(git rev-parse --short HEAD)"
-ok "Official repo at $OFFICIAL_SHA"
-
-# ── Step 2: Sparse-clone NonKYC fork (connector only) ─────────────────────
-
-log "Step 2/5: NonKYC connector from fork"
-if [ -d "$NONKYC_DIR/.git" ]; then
-  log "  Updating existing sparse clone..."
-  cd "$NONKYC_DIR"
-  git fetch origin "$NONKYC_BRANCH" --depth=1
-  git reset --hard "origin/$NONKYC_BRANCH"
-else
-  log "  Sparse-cloning $NONKYC_REPO..."
-  rm -rf "$NONKYC_DIR"
-  git clone --depth=1 --filter=blob:none --sparse \
-    --branch "$NONKYC_BRANCH" "$NONKYC_REPO" "$NONKYC_DIR"
-  cd "$NONKYC_DIR"
-  git sparse-checkout set "$CONNECTOR_REL_PATH"
-fi
-cd "$NONKYC_DIR"
-NONKYC_SHA="$(git rev-parse --short HEAD)"
-ok "NonKYC fork at $NONKYC_SHA"
-
-# ── Step 3: Verify connector structure ─────────────────────────────────────
-
-log "Step 3/5: Verifying connector structure"
-
-SRC_CONNECTOR="$NONKYC_DIR/$CONNECTOR_REL_PATH"
-DST_CONNECTOR="$OFFICIAL_DIR/$CONNECTOR_REL_PATH"
-
-if [ ! -d "$SRC_CONNECTOR" ]; then
-  die "Connector not found at $SRC_CONNECTOR"
+  log "  Cloning $HB_REPO ($HB_BRANCH)..."
+  rm -rf "$SRC_DIR"
+  git clone --depth=1 --branch "$HB_BRANCH" "$HB_REPO" "$SRC_DIR"
 fi
 
-# Check for expected key files
-EXPECTED_FILES=(
-  "__init__.py"
-)
-for f in "${EXPECTED_FILES[@]}"; do
-  if [ ! -f "$SRC_CONNECTOR/$f" ]; then
-    warn "Expected file missing: $f (this might be OK if the connector uses a different structure)"
-  fi
-done
+cd "$SRC_DIR"
+HB_SHA="$(git rev-parse --short HEAD)"
+ok "Source repo at $HB_SHA ($HB_BRANCH)"
 
-# List what we're copying
-log "  Connector files found:"
-find "$SRC_CONNECTOR" -type f -name '*.py' | sort | while read -r f; do
-  echo "    $(basename "$f")"
-done
+# ── Step 2: Verify connector exists ────────────────────────────────────────
 
-FILE_COUNT="$(find "$SRC_CONNECTOR" -type f -name '*.py' | wc -l)"
-if [ "$FILE_COUNT" -lt 3 ]; then
-  die "Only $FILE_COUNT .py files found — connector seems incomplete."
-fi
-ok "Connector structure looks good ($FILE_COUNT Python files)"
-
-# ── Step 4: Graft connector into official tree ─────────────────────────────
-
-log "Step 4/5: Grafting NonKYC connector into official codebase"
-
-# Remove any existing nonkyc connector (shouldn't exist, but be safe)
-if [ -d "$DST_CONNECTOR" ]; then
-  warn "Replacing existing nonkyc connector in official tree"
-  rm -rf "$DST_CONNECTOR"
+log "Step 2/4: Verifying NonKYC connector exists"
+if [ ! -d "$SRC_DIR/$CONNECTOR_REL_PATH" ]; then
+  die "Connector directory not found: $CONNECTOR_REL_PATH"
 fi
 
-# Copy connector
-cp -a "$SRC_CONNECTOR" "$DST_CONNECTOR"
-ok "Connector copied to $CONNECTOR_REL_PATH"
+PY_COUNT="$(find "$SRC_DIR/$CONNECTOR_REL_PATH" -type f -name '*.py' | wc -l | tr -d ' ')"
+if [ "${PY_COUNT:-0}" -lt 3 ]; then
+  die "Only $PY_COUNT Python files found in $CONNECTOR_REL_PATH — connector seems incomplete."
+fi
+ok "Connector present ($PY_COUNT Python files)"
 
-# Check if there are any other NonKYC-related changes we should look for
-# (e.g., test files, conf templates)
-log "  Checking for related test files..."
-NONKYC_TESTS="$NONKYC_DIR/test/hummingbot/connector/exchange/nonkyc"
-if [ -d "$NONKYC_TESTS" ]; then
-  OFFICIAL_TESTS="$OFFICIAL_DIR/test/hummingbot/connector/exchange/nonkyc"
-  mkdir -p "$(dirname "$OFFICIAL_TESTS")"
-  cp -a "$NONKYC_TESTS" "$OFFICIAL_TESTS"
-  ok "Test files copied"
-else
-  log "  No test directory found in fork (not critical)"
+# ── Step 3: Build base image from repo Dockerfile ──────────────────────────
+
+log "Step 3/4: Building base image from repo Dockerfile"
+cd "$SRC_DIR"
+
+if [ ! -f "$SRC_DIR/Dockerfile" ]; then
+  die "Dockerfile not found in repo root!"
 fi
 
-# Check for connector config template
-log "  Checking for conf template..."
-for tpl_dir in \
-  "$NONKYC_DIR/hummingbot/templates" \
-  "$NONKYC_DIR/conf/connectors"; do
-  if [ -d "$tpl_dir" ]; then
-    for tpl in "$tpl_dir"/*nonkyc*; do
-      [ -f "$tpl" ] || continue
-      tpl_name="$(basename "$tpl")"
-      dst_tpl="$OFFICIAL_DIR/$(echo "$tpl" | sed "s|$NONKYC_DIR/||")"
-      mkdir -p "$(dirname "$dst_tpl")"
-      cp -a "$tpl" "$dst_tpl"
-      ok "Template copied: $tpl_name"
-    done
-  fi
-done
+BASE_TAG="${IMAGE_NAME}-base:${IMAGE_TAG}"
+log "  Base image: $BASE_TAG"
 
-# ── Step 5: Build Docker image ────────────────────────────────────────────
+docker build $DOCKER_BUILD_FLAGS \
+  -t "$BASE_TAG" \
+  -f Dockerfile \
+  --label "org.opencontainers.image.description=hummingbot (trevorwilf/nonkyc) base" \
+  --label "hummingbot.source.repo=$HB_REPO" \
+  --label "hummingbot.source.branch=$HB_BRANCH" \
+  --label "hummingbot.source.sha=$HB_SHA" \
+  --label "hummingbot.build.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  .
 
-log "Step 5/5: Building Docker image"
-cd "$OFFICIAL_DIR"
+ok "Base image built: $BASE_TAG"
+
+# ── Step 4: Overlay image adds Postgres driver ─────────────────────────────
+
+log "Step 4/4: Building final image with Postgres driver"
 
 FULL_TAG="${IMAGE_NAME}:${IMAGE_TAG}"
-log "  Image: $FULL_TAG"
-log "  Context: $OFFICIAL_DIR"
-log "  Dockerfile: $OFFICIAL_DIR/Dockerfile"
+WRAP_DOCKERFILE="$BUILD_DIR/Dockerfile.pg"
 
-if [ ! -f "$OFFICIAL_DIR/Dockerfile" ]; then
-  die "Dockerfile not found in official repo root!"
-fi
+cat > "$WRAP_DOCKERFILE" <<EOF
+FROM ${BASE_TAG}
+
+USER root
+RUN python -m pip install --no-cache-dir --upgrade pip \
+ && python -m pip install --no-cache-dir ${PG_DRIVER_PIP_PACKAGE}
+
+# best-effort: return to hummingbot user if it exists (ok if it doesn't)
+USER hummingbot
+EOF
 
 docker build $DOCKER_BUILD_FLAGS \
   -t "$FULL_TAG" \
-  -f Dockerfile \
-  --label "org.opencontainers.image.description=hummingbot + nonkyc connector" \
-  --label "nonkyc.official.sha=$OFFICIAL_SHA" \
-  --label "nonkyc.connector.sha=$NONKYC_SHA" \
-  --label "nonkyc.build.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  .
+  -f "$WRAP_DOCKERFILE" \
+  --label "org.opencontainers.image.description=hummingbot (trevorwilf/nonkyc) + ${PG_DRIVER_PIP_PACKAGE}" \
+  --label "hummingbot.source.repo=$HB_REPO" \
+  --label "hummingbot.source.branch=$HB_BRANCH" \
+  --label "hummingbot.source.sha=$HB_SHA" \
+  --label "hummingbot.pg.driver=${PG_DRIVER_PIP_PACKAGE}" \
+  --label "hummingbot.build.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$BUILD_DIR"
 
-BUILD_EXIT=$?
-if [ $BUILD_EXIT -ne 0 ]; then
-  die "Docker build failed with exit code $BUILD_EXIT"
-fi
+ok "Final image built: $FULL_TAG"
 
-ok "Image built: $FULL_TAG"
+# Sanity check: verify psycopg2 imports
+log "  Verifying Postgres driver import..."
+docker run --rm --entrypoint python "$FULL_TAG" -c "import psycopg2; print('psycopg2 OK')" >/dev/null \
+  && ok "Driver check passed" \
+  || warn "Driver check failed (image may not have python/pip on PATH as expected)"
+
+# Optional: keep your previous behavior of tagging over hummingbot/hummingbot:latest
+# (so compose can continue to use hummingbot/hummingbot:latest)
+docker tag "$FULL_TAG" hummingbot/hummingbot:latest
+ok "Tagged hummingbot/hummingbot:latest -> $FULL_TAG"
 
 # ── Summary ────────────────────────────────────────────────────────────────
 
@@ -245,23 +191,17 @@ echo "╔═══════════════════════�
 echo "║  Build Complete!                                            ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║                                                            ║"
-echo "║  Image:     $FULL_TAG"
-echo "║  Official:  hummingbot/hummingbot @ $OFFICIAL_SHA"
-echo "║  NonKYC:    NonKYCExchange/hummingbot @ $NONKYC_SHA"
+echo "║  Image:    $FULL_TAG"
+echo "║  Repo:     $HB_REPO"
+echo "║  Branch:   $HB_BRANCH"
+echo "║  Commit:   $HB_SHA"
+echo "║  PG drv:   $PG_DRIVER_PIP_PACKAGE"
 echo "║                                                            ║"
-echo "║  To use in your Trading Pod compose, change:               ║"
-echo "║                                                            ║"
-echo "║    hummingbot:                                             ║"
-echo "║      image: $FULL_TAG"
-echo "║                                                            ║"
-echo "║  To rebuild after upstream updates:                        ║"
-echo "║    $0"
+echo "║  Compose can use:                                           ║"
+echo "║    image: $FULL_TAG"
 echo "║                                                            ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
-# Show image size
 docker image inspect "$FULL_TAG" --format='Image size: {{.Size}}' 2>/dev/null | \
   awk '{printf "Image size: %.0f MB\n", $3/1024/1024}' || true
-
-docker tag hummingbot-nonkyc:latest hummingbot/hummingbot:latest

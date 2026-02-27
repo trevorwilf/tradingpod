@@ -204,7 +204,7 @@ password: admin
 __DASH_CREDS__
 
 log "=== creating conf_client.yml (if missing/empty) ==="
-ensure_file_from_stdin "$HBOT_CONF/conf_client.yml" <<'__CONF_CLIENT__'
+ensure_file_from_stdin "$HBOT_CONF/conf_client.yml" <<__CONF_CLIENT__
 ####################################
 ###   client_config_map config   ###
 ####################################
@@ -247,7 +247,7 @@ mqtt_bridge:
 send_error_logs: true
 
 db_mode:
-  db_engine: postgres
+  db_engine: postgresql+psycopg2
   db_host: 127.0.0.1
   db_port: 5432
   db_name: hummingbot_api

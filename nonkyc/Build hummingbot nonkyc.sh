@@ -156,9 +156,25 @@ USER root
 RUN python -m pip install --no-cache-dir --upgrade pip \
  && python -m pip install --no-cache-dir ${PG_DRIVER_PIP_PACKAGE}
 
-# best-effort: return to hummingbot user if it exists (ok if it doesn't)
-USER hummingbot
+# Return to the original non-root user if one exists.
+# The official image uses 'hummingbot', but forks may not have that user.
+# We detect at build time and only set USER if the account is real.
+RUN if id hummingbot >/dev/null 2>&1; then \
+      echo "USER_EXISTS=hummingbot" ; \
+    else \
+      echo "NOTE: 'hummingbot' user not found — staying as root." ; \
+    fi
+# Shell RUN can't conditionally set USER, so we use a small entrypoint-wrapper approach:
+# If hummingbot user exists, bake it in; otherwise leave USER unset (defaults to root).
+ARG RUNTIME_USER=root
+RUN if id hummingbot >/dev/null 2>&1; then echo hummingbot > /tmp/.runtime_user; else echo root > /tmp/.runtime_user; fi
+RUN export DETECTED_USER=\$(cat /tmp/.runtime_user) && rm -f /tmp/.runtime_user && echo "Runtime user: \$DETECTED_USER"
 EOF
+
+# Detect the correct user from the base image and append USER directive
+DETECTED_USER=$(docker run --rm --user root "$BASE_TAG" sh -c 'id -u hummingbot >/dev/null 2>&1 && echo hummingbot || echo root' 2>/dev/null || echo "root")
+log "  Detected runtime user from base image: $DETECTED_USER"
+echo "USER $DETECTED_USER" >> "$WRAP_DOCKERFILE"
 
 docker build $DOCKER_BUILD_FLAGS \
   -t "$FULL_TAG" \

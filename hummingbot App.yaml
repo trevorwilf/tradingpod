@@ -683,7 +683,6 @@ services:
       - /mnt/sharedrive/apps/hummingbot/patches/docker_service.py:/hummingbot-api/services/docker_service.py:ro
       - /mnt/sharedrive/apps/hummingbot/api/data/bots:/hummingbot-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
-      - /mnt/sharedrive/apps/hummingbot/patches/nonkyc_connector:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/connector/exchange/nonkyc:ro
     environment:
       - TZ=Europe/Tirane
       - USERNAME=${HBOT_API_USERNAME:-admin}

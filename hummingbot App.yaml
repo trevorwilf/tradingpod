@@ -1,3 +1,5 @@
+version: "3.8"
+
 # =============================================================================
 # Hummingbot Trading Pod — v4.0
 #
@@ -9,7 +11,7 @@
 # Init container boot order (all run-once, then exit):
 #   1. hummingbot-seed         → dirs, user configs, EMQX etc
 #   2. hummingbot-api-init     → docker_service.py, controllers, scripts
-#      hummingbot-gateway-init → gateway conf (chains, connectors, tokens)
+#      gateway-init            → gateway conf (chains, connectors, tokens)
 #   3. hummingbot-password-init → .password_verification
 #   (then all app containers start)
 #
@@ -31,7 +33,7 @@ services:
   # VPN Gateway
   # ---------------------------------------------------------------------------
   gluetun:
-    image: qmcgaw/gluetun:v3
+    image: qmcgaw/gluetun:v3.41.1   # pin to a release (avoid latest surprises)
     container_name: hummingbot-gluetun
     cap_add:
       - NET_ADMIN
@@ -43,33 +45,58 @@ services:
       - net.ipv6.conf.all.disable_ipv6=1
       - net.ipv6.conf.default.disable_ipv6=1
       - net.ipv6.conf.lo.disable_ipv6=1
+
     environment:
       - TZ=Europe/Tirane
       - HTTP_CONTROL_SERVER_ADDRESS=:8002
+
       - VPN_SERVICE_PROVIDER=nordvpn
       - VPN_TYPE=wireguard
       - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
-      - SERVER_COUNTRIES=Albania
-      - SERVER_CITIES=Tirana
+
+      # REQUIRED GEO (keep exactly)
+      - SERVER_COUNTRIES=albania
+      - SERVER_CITIES=tirana
+
       - BLOCK_IPV6=on
       - FIREWALL=on
       - FIREWALL_OUTBOUND_SUBNETS=172.16.1.0/24,192.168.1.0/24
       - FIREWALL_INPUT_PORTS=8501,8080,15888,18083
+
       - UPDATER_PERIOD=24h
+
+      - WIREGUARD_MTU=1320
+      # IMPORTANT: prevent UDP/NAT idle timeouts over hours
+      - WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL=25s
+
+      # IMPORTANT: your log showed ICMP timeouts => force DNS small check
+      - HEALTH_SMALL_CHECK_TYPE=dns
+
+      # DNS: DoH (443) + multiple upstreams
+      - DNS_UPSTREAM_RESOLVER_TYPE=doh
+      - DNS_UPSTREAM_RESOLVERS=cloudflare,google,quad9
+
     ports:
-      - "8501:8501"     # Hummingbot Dashboard
-      - "8080:8080"     # Dozzle
-      - "15888:15888"   # Hummingbot Gateway
-      - "18083:18083"   # EMQX Dashboard
+      - "8501:8501"
+      - "8080:8080"
+      - "15888:15888"
+      - "18083:18083"
+
+    # If you REMOVE autoheal label, healthcheck can stay as-is (informational only).
+    # If you KEEP autoheal label, make this far more tolerant (see below).
     healthcheck:
       test: ["CMD-SHELL", "/gluetun-entrypoint healthcheck"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 180s
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+
     restart: unless-stopped
-    labels:
-      autoheal: "true"
+
+    # RECOMMENDED: do NOT autoheal gluetun; it already self-heals the VPN.
+    # labels:
+    #   autoheal: "true"
+
     logging: *default-logging
 
   wait-for-vpn:
@@ -90,12 +117,6 @@ services:
       - AUTOHEAL_INTERVAL=10
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f autoheal > /dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     restart: unless-stopped
     logging: *default-logging
 
@@ -117,7 +138,6 @@ services:
       - ADMIN_USER_ID=${ADMIN_USER_ID}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - SEED_IMAGE_VERSION=
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - /mnt/sharedrive/apps/hummingbot:/humming_dir
     command: "/humming_dir/bootstrap/hummingbot_seed.sh"
@@ -218,10 +238,10 @@ services:
             @staticmethod
             def _get_bot_network_mode() -> str:
                 """Return the network_mode for spawned bot containers.
-                Reads DOCKER_BOT_NETWORK_MODE from env (default: 'none').
+                Reads DOCKER_BOT_NETWORK_MODE from env (default: 'host').
                 Recommended: 'container:gluetun' for VPN routing.
                 """
-                return os.environ.get("DOCKER_BOT_NETWORK_MODE", "none")
+                return os.environ.get("DOCKER_BOT_NETWORK_MODE", "host")
 
             @staticmethod
             def _get_compose_labels(instance_name: str) -> dict:
@@ -517,6 +537,7 @@ services:
 
   hummingbot:
     image: hummingbot/hummingbot:latest
+    # image: hummingbot-nonkyc:latest # custom build with KYC connectors enabled (for personal use only)
     container_name: hummingbot
     network_mode: "service:gluetun"
     depends_on:
@@ -662,15 +683,20 @@ services:
       - /mnt/sharedrive/apps/hummingbot/patches/docker_service.py:/hummingbot-api/services/docker_service.py:ro
       - /mnt/sharedrive/apps/hummingbot/api/data/bots:/hummingbot-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/sharedrive/apps/hummingbot/patches/nonkyc_connector:/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/hummingbot/connector/exchange/nonkyc:ro
     environment:
       - TZ=Europe/Tirane
       - USERNAME=${HBOT_API_USERNAME:-admin}
       - PASSWORD=${HBOT_API_PASSWORD:-admin}
+      - HBOT_API_USERNAME=${HBOT_API_USERNAME:-admin}
+      - HBOT_API_PASSWORD=${HBOT_API_PASSWORD:-admin}
+      - HBOT_API_CONFIG_PASSWORD=${CONFIG_PASSWORD:-admin}
+      - HBOT_API_DEBUG_MODE=${DEV_VAR:-true}
       - BROKER_HOST=127.0.0.1
       - BROKER_PORT=1883
       - DATABASE_URL=postgresql+asyncpg://hbot:${POSTGRES_PASSWORD}@127.0.0.1:5432/hummingbot_api
       - GATEWAY_URL=http://127.0.0.1:15888
-      - DOCKER_BOT_NETWORK_MODE=container:hummingbot-gluetun
+      - DOCKER_BOT_NETWORK_MODE=${DOCKER_BOT_NETWORK_MODE:-none}
       - BOTS_PATH=/mnt/sharedrive/apps/hummingbot/api/data
     healthcheck:
       test:
@@ -716,9 +742,7 @@ services:
       autoheal: "true"
     logging: *default-logging
     healthcheck:
-      # MCP is a stdio-based server — no local port to probe.
-      # Verify the main python process is still alive.
-      test: ["CMD-SHELL", "pgrep -f 'python.*mcp' > /dev/null || exit 1"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -765,7 +789,7 @@ services:
 
   condor:
     image: hummingbot/condor:latest
-    container_name: hummingbot-condor
+    container_name: hummingbot-condor-bot
     network_mode: "service:gluetun"
     depends_on:
       wait-for-vpn:

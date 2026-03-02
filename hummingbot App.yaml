@@ -81,6 +81,8 @@ services:
       - "8080:8080"
       - "15888:15888"
       - "18083:18083"
+      - "27017:27017"
+      - "28081:28081"
 
     # If you REMOVE autoheal label, healthcheck can stay as-is (informational only).
     # If you KEEP autoheal label, make this far more tolerant (see below).
@@ -893,7 +895,7 @@ services:
     # Cap WiredTiger cache — adjust to your TrueNAS RAM headroom
     command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "mongodb://admin:admin@127.0.0.1:27017/admin", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -2,7 +2,7 @@
 set -eu
 
 # -----------------------------------------------------------------------------
-# hummingbot_seed.sh  v4.0
+# hummingbot_seed.sh  v4.1
 #
 # One-shot bootstrap (runs in the emqx:5 image). Creates the full directory
 # tree + user-owned config files required by the Trading Pod stack.
@@ -135,6 +135,8 @@ CONDOR_CONFIG="$CONDOR_BASE/config.yml"
 BOOTSTRAP_DIR="$BASE/bootstrap"
 PATCHES_DIR="$BASE/patches"
 
+MONGODB_DATA="$BASE/mongodb/data"
+
 # ==================== PRE-FLIGHT ====================
 
 log "=== mount check ==="
@@ -179,6 +181,9 @@ ensure_dir "$(dirname "$DASHBOARD_CRED")"
 ensure_dir "$CONDOR_DATA"
 ensure_dir "$CONDOR_ROUTINES"
 ensure_dir "$(dirname "$CONDOR_CONFIG")"
+
+# MongoDB data directory (for Quants Lab candle data store)
+ensure_dir "$MONGODB_DATA"
 
 # ==================== FILE MOUNT GUARDS ====================
 
@@ -366,6 +371,11 @@ chmod -R 777 "$BASE" 2>/dev/null || true
 
 chown -R 999:999 "$POSTGRES_DATA" 2>/dev/null || true
 chmod 700 "$POSTGRES_DATA" 2>/dev/null || true
+
+# MongoDB data dir — mongo:7 image runs as UID 999 (mongodb user)
+# This is a different UID 999 than postgres; both use 999 by convention.
+# Since they're in separate directories this is fine.
+chown -R 999:999 "$MONGODB_DATA" 2>/dev/null || true
 
 EMQX_UID="$(id -u emqx 2>/dev/null || true)"
 EMQX_GID="$(id -g emqx 2>/dev/null || true)"

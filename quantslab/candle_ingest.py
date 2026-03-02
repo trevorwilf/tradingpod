@@ -62,10 +62,15 @@ REQUEST_DELAY = 1
 
 # ─── Interval Mapping ────────────────────────────────────────────────────────
 # Standardized interval string → exchange-specific parameter values
+#
+# None = exchange does not support this interval.
+# The fetcher will skip and log a warning instead of returning wrong data.
+#
+# NonKYC minimum resolution is 5 minutes.  1m is NOT supported by NonKYC.
 
 INTERVAL_MAP = {
     # standard   NonKYC (minutes)   Binance         MEXC
-    "1m":       {"nonkyc": 5,       "binance": "1m",    "mexc": "1m"},
+    "1m":       {"nonkyc": None,    "binance": "1m",    "mexc": "1m"},
     "5m":       {"nonkyc": 5,       "binance": "5m",    "mexc": "5m"},
     "15m":      {"nonkyc": 15,      "binance": "15m",   "mexc": "15m"},
     "30m":      {"nonkyc": 30,      "binance": "30m",   "mexc": "30m"},
@@ -109,13 +114,17 @@ def fetch_nonkyc_candles(
     Fetch candles from NonKYC REST API.
 
     GET https://api.nonkyc.io/api/v2/market/candles
-        ?symbol=BTC/USDT&resolution=60&countBack=1000[&from=UNIX_S&to=UNIX_S]
+        ?symbol=BTC/USDT&resolution=60&countBack=500[&from=UNIX_S&to=UNIX_S]
 
     Response: { "bars": [{ "time": int, "open": float, "high": float,
                            "low": float, "close": float, "volume": float }] }
     """
-    symbol = to_nonkyc_symbol(pair)
     resolution = INTERVAL_MAP[interval]["nonkyc"]
+    if resolution is None:
+        log.warning("  NonKYC does not support %s interval — skipping", interval)
+        return []
+
+    symbol = to_nonkyc_symbol(pair)
 
     params: dict[str, Any] = {
         "symbol": symbol,
@@ -156,12 +165,16 @@ def fetch_binance_candles(
     Fetch candles from Binance public API.
 
     GET https://api.binance.com/api/v3/klines
-        ?symbol=BTCUSDT&interval=1h&limit=1000[&startTime=UNIX_MS]
+        ?symbol=BTCUSDT&interval=1h&limit=500[&startTime=UNIX_MS]
 
     Response: list of lists [open_time, open, high, low, close, volume, ...]
     """
-    symbol = to_binance_symbol(pair)
     bi_interval = INTERVAL_MAP[interval]["binance"]
+    if bi_interval is None:
+        log.warning("  Binance does not support %s interval — skipping", interval)
+        return []
+
+    symbol = to_binance_symbol(pair)
 
     params: dict[str, Any] = {
         "symbol": symbol,
@@ -199,12 +212,16 @@ def fetch_mexc_candles(
     Fetch candles from MEXC v3 public API.
 
     GET https://api.mexc.com/api/v3/klines
-        ?symbol=BTCUSDT&interval=1h&limit=1000[&startTime=UNIX_MS]
+        ?symbol=BTCUSDT&interval=1h&limit=500[&startTime=UNIX_MS]
 
     Response: list of lists [open_time, open, high, low, close, volume, ...]
     """
-    symbol = to_mexc_symbol(pair)
     mx_interval = INTERVAL_MAP[interval]["mexc"]
+    if mx_interval is None:
+        log.warning("  MEXC does not support %s interval — skipping", interval)
+        return []
+
+    symbol = to_mexc_symbol(pair)
 
     params: dict[str, Any] = {
         "symbol": symbol,
@@ -320,6 +337,12 @@ def ingest_pair(
     fetcher = FETCHERS.get(connector)
     if fetcher is None:
         log.error("No fetcher for connector '%s' — skipping %s %s", connector, pair, interval)
+        return 0
+
+    # Pre-check: does this connector support the requested interval?
+    interval_cfg = INTERVAL_MAP.get(interval, {})
+    if interval_cfg.get(connector) is None:
+        log.info("  %s does not support %s — skipping %s", connector, interval, hbot_pair)
         return 0
 
     # Check how far back we already have data

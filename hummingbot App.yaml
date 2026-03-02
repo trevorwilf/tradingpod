@@ -61,7 +61,7 @@ services:
       - BLOCK_IPV6=on
       - FIREWALL=on
       - FIREWALL_OUTBOUND_SUBNETS=172.16.1.0/24,192.168.1.0/24
-      - FIREWALL_INPUT_PORTS=8501,8080,15888,18083
+      - FIREWALL_INPUT_PORTS=8501,8080,15888,18083,27017,28081
 
       - UPDATER_PERIOD=24h
 
@@ -840,6 +840,123 @@ services:
       timeout: 30s
       retries: 5
       start_period: 30s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+
+# =============================================================================
+# WHAT THIS ADDS:
+#   - MongoDB 7 (candle data store, shared with Quants Lab desktop)
+#   - Mongo Express (optional web UI, localhost-only)
+#   - candle-ingest (nightly cron that pulls OHLCV from NonKYC, Binance, MEXC)
+#
+# NETWORKING:
+#   All three containers share Gluetun's network namespace so the
+#   ingestion script can reach exchange APIs through the VPN.
+#   MongoDB port 27017 is punched through Gluetun's firewall so your
+#   Quants Lab desktop machine can connect over the LAN.
+#
+# PREREQUISITES:
+#   1. Add port 27017 to FIREWALL_INPUT_PORTS in gluetun's environment
+#      in hummingbot_App.yaml:
+#        - FIREWALL_INPUT_PORTS=8501,8080,15888,18083,27017
+#
+#   2. Place these files in the bootstrap directory:
+#        /mnt/sharedrive/apps/hummingbot/bootstrap/candle_ingest.py
+#        /mnt/sharedrive/apps/hummingbot/bootstrap/candle_ingest_config.yaml
+#
+#   3. Add to .env (or change defaults below):
+#        MONGO_ROOT_PASSWORD=admin
+# =============================================================================
+
+  # ── MongoDB (candle data store, LAN-accessible for Quants Lab) ──────────
+  mongodb:
+    image: mongo:7
+    container_name: hummingbot-mongodb
+    network_mode: "service:gluetun"
+    depends_on:
+      wait-for-vpn:
+        condition: service_completed_successfully
+      gluetun:
+        condition: service_healthy
+      hummingbot-seed:
+        condition: service_completed_successfully
+    environment:
+      - TZ=Europe/Tirane
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-admin}
+      - MONGO_INITDB_DATABASE=quants_lab
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/mongodb/data:/data/db
+    # Cap WiredTiger cache — adjust to your TrueNAS RAM headroom
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "2"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "mongodb://admin:admin@127.0.0.1:27017/admin", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging: *default-logging
+
+  # ── Mongo Express (optional web UI — localhost-only via Gluetun port) ───
+  # Access at http://<TRUENAS_IP>:28081  (add 28081 to FIREWALL_INPUT_PORTS
+  # if you want remote access, or leave it off for localhost-only via SSH tunnel)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: hummingbot-mongo-express
+    network_mode: "service:gluetun"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - TZ=Europe/Tirane
+      - ME_CONFIG_MONGODB_SERVER=127.0.0.1
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=${MONGO_ROOT_PASSWORD:-admin}
+      - ME_CONFIG_BASICAUTH_USERNAME=admin
+      - ME_CONFIG_BASICAUTH_PASSWORD=${MONGO_EXPRESS_PASSWORD:-changeme}
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Candle Ingestion Cron ───────────────────────────────────────────────
+  # Runs candle_ingest.py on a schedule (default: every 6 hours).
+  # The script pulls OHLCV data from NonKYC, Binance, and MEXC,
+  # then upserts into MongoDB for Quants Lab to consume.
+  candle-ingest:
+    image: python:3.11-slim
+    container_name: hummingbot-candle-ingest
+    network_mode: "service:gluetun"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      gluetun:
+        condition: service_healthy
+    environment:
+      - TZ=Europe/Tirane
+      - MONGO_URI=mongodb://admin:${MONGO_ROOT_PASSWORD:-admin}@127.0.0.1:27017/quants_lab?authSource=admin
+      - MONGO_DATABASE=quants_lab
+      # How often to run (cron-style in the entrypoint sleep loop)
+      - INGEST_INTERVAL_HOURS=6
+    volumes:
+      - /mnt/sharedrive/apps/hummingbot/bootstrap/candle_ingest.py:/app/candle_ingest.py:ro
+      - /mnt/sharedrive/apps/hummingbot/bootstrap/candle_ingest_config.yaml:/app/config.yaml:ro
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        pip install --quiet pymongo requests pyyaml
+        echo "[candle-ingest] Dependencies installed. Starting ingestion loop."
+        while true; do
+          echo "[candle-ingest] === Run started at $$(date -Iseconds) ==="
+          python /app/candle_ingest.py --config /app/config.yaml
+          echo "[candle-ingest] === Run complete. Sleeping $${INGEST_INTERVAL_HOURS}h ==="
+          sleep "$$(( INGEST_INTERVAL_HOURS * 3600 ))"
+        done
     restart: unless-stopped
     labels:
       autoheal: "true"
